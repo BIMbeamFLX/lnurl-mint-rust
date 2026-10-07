@@ -447,7 +447,8 @@ def main() -> None:
 
     # ---- rotate into a fresh note, then melt it to B ----
     k1b, hb = bearer_note(2)
-    assert a.get(f"/w/cb?k1={k1}&p1={hb}")["status"] == "OK"
+    rotated = a.get(f"/w/cb?k1={k1}&p1={hb}")
+    assert rotated["status"] == "OK" and rotated["r"].startswith("cr990n1"), rotated
     out = b.admin_post("/node/invoice", {"amount_msat": 99_000, "description": "melt"})
     melt = a.get(f"/w/cb?k1={k1b}&pr={out['bolt11']}")
     assert melt["status"] == "OK", melt

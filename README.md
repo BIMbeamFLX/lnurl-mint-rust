@@ -262,7 +262,7 @@ user and password in an environment file.
 | `POST /p/<username>?cx1=&sig=[&npub=]` | Register a username, or overwrite one (proven by the branch on file). |
 | `DELETE /p/<username>?sig=` | Unregister. |
 | `GET /w?k1=<spend>` / `GET /w?p=<cp1 or h>` | Informational withdrawRequest; never burns. |
-| `GET /w/cb` | Melt (`k1`, `pr`), rotate (`k1`, `p1`), split (`k1`…, `amount`, `p1`, `p2`), merge (`k1`…, `p1`). |
+| `GET /w/cb` | Melt (`k1`, `pr`), rotate (`k1`, `p1`), split (`k1`…, `amount`, `p1`, `p2`), merge (`k1`…, `p1`). A rotate also answers with a `cr1` certificate `r`. |
 | `GET /verify/<payment_hash>` | LUD-21, for mint invoices and melts. |
 | `GET /.well-known/lnurlw/<username>` | Informational: node, bounds, outstanding total. |
 | `GET /.well-known/nostr.json?name=` | NIP-05. |
@@ -270,6 +270,43 @@ user and password in an environment file.
 
 Every LNURL endpoint answers HTTP 200, with `{"status": "ERROR", "reason"}` on
 failure (LUD-01).
+
+### Rotation certificates
+
+A rotate (one `k1`, a `p1`, no `amount`, no `pr`) answers with `c`, the new
+note's `cs1`, and with `r`, a `cr1` certificate: the same kind of signature,
+by the same node key, over
+
+    LNURLcash:rotate:<amount_msat>:<hex(Q_spent)>:<hex(Q)>
+
+That is the note this mint burned, the one note it credited in its place, and
+that note's value, which the certificate's human-readable part carries as a
+`cs1`'s does (`cr10n1…` for 1000 msat). `r` and `cr1` are an extension: they
+are not part of LUD-25.
+
+A note's own `cs1` says the note exists. A `cr1` says where it came from. This
+mint burns a note once, so it signs at most one such statement for any
+`Q_spent`. A split or a merge gets none, since neither has one note that
+became one other, and neither does a melt or the informational request.
+
+That is what an asset anchored to a note needs. lnurl-wallet's Seals hand a
+consignment from owner to owner, and with one `cr1` per transfer its holder
+can check, against this mint's key alone, that every step of the history
+happened here, in that order.
+
+The statement is the node key's, and no stronger than this mint's own record
+of what it burned. Two instances signing with one key, or a note database
+restored from before a rotation, could each certify a different successor for
+the same note. Keep one note database per node key.
+
+There is no new table and no new endpoint. The certificate is computed from
+the request, and an exact retry of a completed rotate (LUD-25's "Retrying a
+mutation", which reads the burn this mint already recorded) is signed again
+and answered with the same certificate, to anyone who can repeat that
+request. LDK signs a message deterministically (RFC 6979), so the bytes are
+the same too. If the node cannot sign, the rotate still stands and `r` is
+left out, as `c` is. A retry once it can sign is then how the certificate is
+had at all.
 
 ### Admin CLI
 
@@ -391,7 +428,11 @@ cargo test
 This runs LUD-25's and LUD-26's test vectors against Bitcoin Core's
 interpreter, the store's transactions and migrations, the protocol over HTTP
 for everything that needs no Lightning, and checks that `cs1` signatures are
-byte-identical to LDK's own `signmessage`.
+byte-identical to LDK's own `signmessage`. Rotation certificates are checked
+against lnurl-mint's `cr1` test vector, and over HTTP with a node key but no
+node: a rotate's `r` verifies, for bearer and key-path notes and step by step
+along a chain; a retry answers with it again, or with the one whose signing
+had failed; a split or a merge has none.
 
 The money paths run end to end on regtest, with a real bitcoind and mint
 processes: A under test, B paying and being paid and acting as an LSPS2

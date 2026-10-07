@@ -235,6 +235,13 @@ pub struct Ln {
     preimage_key: [u8; 32],
     lsp: Option<LspConfig>,
     rgs_url: Option<String>,
+    /// A node key where no node runs, for the tests that check certificates,
+    /// and the start of the messages it refuses to sign.
+    #[cfg(test)]
+    signer: Option<(
+        ldk_node::bitcoin::secp256k1::SecretKey,
+        Option<&'static str>,
+    )>,
 }
 
 impl std::fmt::Debug for Ln {
@@ -262,6 +269,19 @@ impl Ln {
             preimage_key: [0; 32],
             lsp: None,
             rgs_url: None,
+            #[cfg(test)]
+            signer: None,
+        }
+    }
+
+    /// No node either, but its key: messages are signed as LDK signs them,
+    /// except those starting with `refused`, whose signing fails.
+    #[cfg(test)]
+    pub fn signing(network: Network, key: [u8; 32], refused: Option<&'static str>) -> Self {
+        let key = ldk_node::bitcoin::secp256k1::SecretKey::from_slice(&key).ok();
+        Ln {
+            signer: key.map(|key| (key, refused)),
+            ..Ln::new(network)
         }
     }
 
@@ -349,6 +369,8 @@ impl Ln {
             preimage_key: seed.preimages(),
             lsp: config.lsp,
             rgs_url: config.rgs_url,
+            #[cfg(test)]
+            signer: None,
         })
     }
 
@@ -484,6 +506,14 @@ impl Ln {
     /// Lightning signmessage is (sha256d of the prefixed message): r || s ||
     /// recovery id, as LUD-25's `cs1` wants.
     pub fn sign_message(&self, message: &str) -> Result<[u8; 65]> {
+        #[cfg(test)]
+        if let Some((key, refused)) = &self.signer {
+            use ldk_node::lightning::util::message_signing::sign;
+            if refused.is_some_and(|start| message.starts_with(start)) {
+                bail!("signing {message:?} is refused");
+            }
+            return signature_from_zbase32(&sign(message.as_bytes(), key));
+        }
         let node = self.node()?;
         signature_from_zbase32(&node.sign_message(message.as_bytes()))
     }

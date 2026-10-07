@@ -130,6 +130,26 @@ pub(crate) fn owns_branch(
     schnorr::verify(&schnorr::Signature::from_byte_array(sig), &digest, &pk).is_ok()
 }
 
+/// What a rotation certificate signs: the note this mint burned, the one
+/// note it credited in its place, and that note's value. Its second field
+/// tells it from a note's own certificate, where an amount stands there.
+pub(crate) fn rotation_message(spent_id: &str, note_id: &str, amount_msat: u64) -> String {
+    format!("LNURLcash:rotate:{amount_msat}:{spent_id}:{note_id}")
+}
+
+/// A `cr1`: a `cs1` under its own prefix, so neither is taken for the other.
+/// lnurlcash-core 0.2.3 encodes none and keeps its amount suffix to itself,
+/// so the human-readable part is taken from the `cs1` of the same amount.
+/// This belongs in lnurlcash-core once it exports one.
+pub(crate) fn encode_cr1_with_amount(amount_msat: u64, signature: &[u8; 65]) -> String {
+    use bech32::{Bech32m, Hrp};
+    let cs1 = encode_cs1_with_amount(amount_msat, signature);
+    // no data character is a '1': the last one is the separator
+    let amount = &cs1[2..cs1.rfind('1').expect("a cs1 has a separator")];
+    let hrp = Hrp::parse(&format!("cr{amount}")).expect("a cs1's amount is a valid HRP");
+    bech32::encode::<Bech32m>(hrp, signature).expect("a cr1 is well under 1023 characters")
+}
+
 impl AppState {
     fn is_own_username(&self, username: &str) -> bool {
         let username = username.to_ascii_lowercase();
@@ -156,6 +176,28 @@ impl AppState {
             Ok(sig) => Some(encode_cs1_with_amount(amount_msat, &sig)),
             Err(e) => {
                 log::debug!("could not certify a note: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// A `cr1` certificate that the note `spent_id` was burned into the one
+    /// note `note_id`, worth `amount_msat`: where a note came from, which its
+    /// own `cs1` cannot say. An extension, not part of LUD-25. Only ever for
+    /// a rotate: a split has two outputs and a merge several inputs. It is
+    /// this key's statement about this mint's own record of what it burned,
+    /// and no stronger than that record. `None` if signing failed.
+    fn rotation_certificate(
+        &self,
+        spent_id: &str,
+        note_id: &str,
+        amount_msat: u64,
+    ) -> Option<String> {
+        let message = rotation_message(spent_id, note_id, amount_msat);
+        match self.ln.sign_message(&message) {
+            Ok(sig) => Some(encode_cr1_with_amount(amount_msat, &sig)),
+            Err(e) => {
+                log::debug!("could not certify a rotation: {e:#}");
                 None
             }
         }
@@ -471,10 +513,18 @@ impl AppState {
                         (Some(id2), Some(a2)) => self.certificate(id2, a2),
                         _ => None,
                     };
+                    // only a rotate, one note in and one note out, was a rotation
+                    let r = match (note_ids.as_slice(), &burn.id2) {
+                        ([spent], None) => {
+                            self.rotation_certificate(spent, &burn.id, burn.amount1_msat)
+                        }
+                        _ => None,
+                    };
                     return Ok(compact(json!({
                         "status": "OK",
                         "c": self.certificate(&burn.id, burn.amount1_msat),
                         "c2": c2,
+                        "r": r,
                     })));
                 }
             }
@@ -518,9 +568,15 @@ impl AppState {
         // rotate is a merge of one: the refund is 0
         let merged = total + (note_ids.len() as u64 - 1) * s.base_fee_msat;
         self.store.swap(&note_ids, &[(p1_id.clone(), merged)])?;
+        // a merge has no one note to name as the one that became p1
+        let r = match note_ids.as_slice() {
+            [spent] => self.rotation_certificate(spent, &p1_id, merged),
+            _ => None,
+        };
         Ok(compact(json!({
             "status": "OK",
             "c": self.certificate(&p1_id, merged),
+            "r": r,
         })))
     }
 
